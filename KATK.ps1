@@ -53,7 +53,7 @@ function Show-KATKMenu {
     Clear-Host
 
     $title = "KATK TOOLS - VERSION $global:KATK_Version"; if ($global:KATK_Branch -ne "stable") { $title += " [$($global:KATK_Branch.ToUpper())]" }
-    Show-KATKHeader $title "DEV BY BaoTV6 CMU K7 Sông Đốc"
+    Show-KATKHeader $title "DEV BY KATK"
 
     Write-Host ""
     Write-Host "LỰA CHỌN CÔNG CỤ:" -ForegroundColor Yellow

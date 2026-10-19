@@ -741,7 +741,7 @@ Schedule-RemoveTempFolder -FolderPath $rootTempDir
 
 Show-KATKBox "✅ CÀI ĐẶT HOÀN TẤT!" -Color Cyan -TextColor Yellow
 Write-Host "   • Mọi vấn đề phát sinh vui lòng liên hệ: 107941" -ForegroundColor Gray
-Write-Host "   • Developer: KATK - BaoTV6" -ForegroundColor Gray
+Write-Host "   • DEV BY KATK" -ForegroundColor Gray
 Write-Host "   • Thư mục tạm $rootTempDir sẽ được xóa sau khi máy khởi động lại." -ForegroundColor Cyan
 
 Wait-KATKBack
