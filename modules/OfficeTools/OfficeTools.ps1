@@ -47,8 +47,8 @@ function Show-Menu {
     Write-Host "LỰA CHỌN CÔNG CỤ:" -ForegroundColor Yellow
     Write-Host "────────────────────────────────────────" -ForegroundColor DarkGray
 
-    Write-Host " [1] Uninstall Office" -ForegroundColor White
-    Write-Host "     Gỡ cài đặt Office hiện tại`n" -ForegroundColor DarkGray
+    Write-Host " [1] Gỡ sạch Office" -ForegroundColor White
+    Write-Host "     Gỡ chuẩn + quét dọn toàn bộ dấu vết Office còn sót`n" -ForegroundColor DarkGray
 
     Write-Host " [2] Install Office" -ForegroundColor White
     Write-Host "     Cài đặt Office mới`n" -ForegroundColor DarkGray
