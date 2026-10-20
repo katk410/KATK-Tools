@@ -2,6 +2,8 @@
 
 $global:KATK_Branch = if ($global:KATK_NextBranch) { $global:KATK_NextBranch } else { "stable" }
 $global:KATK_NextBranch = $null
+$global:KATK_Label = $global:KATK_NextLabel
+$global:KATK_NextLabel = $null
 
 $global:KATK_BaseUrl = "https://raw.githubusercontent.com/katk410/KATK-Tools/$global:KATK_Branch"
 
@@ -52,7 +54,7 @@ function Show-KATKMenu {
 
     Clear-Host
 
-    $title = "KATK TOOLS - VERSION $global:KATK_Version"; if ($global:KATK_Branch -ne "stable") { $title += " [$($global:KATK_Branch.ToUpper())]" }
+    $title = "KATK TOOLS - VERSION $global:KATK_Version"; if ($global:KATK_Label) { $title += " [$global:KATK_Label $($global:KATK_Branch.Substring(0, [Math]::Min(7, $global:KATK_Branch.Length)))]" } elseif ($global:KATK_Branch -ne "stable") { $title += " [$($global:KATK_Branch.ToUpper())]" }
     Show-KATKHeader $title "DEV BY KATK"
 
     Write-Host ""
