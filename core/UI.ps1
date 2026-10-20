@@ -1,4 +1,4 @@
-﻿$global:KATK_Author = "DEV BY KATK"
+$global:KATK_Author = "DEV BY KATK"
 
 function global:Show-KATKHeader {
     param(

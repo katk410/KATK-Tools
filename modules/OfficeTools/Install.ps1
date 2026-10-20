@@ -1,4 +1,4 @@
-﻿Add-Type -AssemblyName System.Net.Http
+Add-Type -AssemblyName System.Net.Http
 
 function Test-OfficeInstalled {
     $regPaths = @(

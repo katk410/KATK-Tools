@@ -1,6 +1,6 @@
-﻿if (-not (Get-Command Show-KATKHeader -ErrorAction SilentlyContinue)) {
+if (-not (Get-Command Show-KATKHeader -ErrorAction SilentlyContinue)) {
     $katkBase = if ($global:KATK_BaseUrl) { $global:KATK_BaseUrl } else { "https://raw.githubusercontent.com/katk410/KATK-Tools/stable" }
-    Invoke-Expression (Invoke-RestMethod -Uri "$katkBase/core/UI.ps1" -UseBasicParsing)
+    Invoke-Expression ((Invoke-RestMethod -Uri "$katkBase/core/UI.ps1" -UseBasicParsing).TrimStart([char]0xFEFF))
 }
 Assert-KATKAdmin
 
@@ -22,7 +22,7 @@ $global:KATK_OfficeBin = Join-Path $global:tempDir "OfficeTools"
 
 try {
     foreach ($sub in "Uninstall.ps1", "Install.ps1", "Troubleshoot.ps1") {
-        $code = Invoke-RestMethod -Uri "$officeBase/$sub" -UseBasicParsing -ErrorAction Stop
+        $code = (Invoke-RestMethod -Uri "$officeBase/$sub" -UseBasicParsing -ErrorAction Stop).TrimStart([char]0xFEFF)
         . ([ScriptBlock]::Create($code))
     }
 

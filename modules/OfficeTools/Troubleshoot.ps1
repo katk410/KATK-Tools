@@ -1,4 +1,4 @@
-﻿function Repair-Activation {
+function Repair-Activation {
     Show-Step "SỬA LỖI ACTIVE OFFICE"
 
     $scriptDir = if ($global:KATK_OfficeBin) { $global:KATK_OfficeBin } else { Join-Path $PSScriptRoot "bin" }

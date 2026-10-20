@@ -1,4 +1,4 @@
-﻿function Write-KATKUnLog([string]$Text) {
+function Write-KATKUnLog([string]$Text) {
     try { Add-Content -LiteralPath $st.Log -Value ("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $Text) -Encoding UTF8 } catch {}
 }
 

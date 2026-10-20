@@ -1,4 +1,4 @@
-﻿[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 
 $global:KATK_Branch = if ($global:KATK_NextBranch) { $global:KATK_NextBranch } else { "stable" }
 $global:KATK_NextBranch = $null
@@ -7,7 +7,7 @@ $global:KATK_BaseUrl = "https://raw.githubusercontent.com/katk410/KATK-Tools/$gl
 
 $global:KATK_Version = "3.0"
 
-try { Invoke-Expression (Invoke-RestMethod -Uri "$global:KATK_BaseUrl/core/UI.ps1" -UseBasicParsing -ErrorAction Stop) }
+try { Invoke-Expression ((Invoke-RestMethod -Uri "$global:KATK_BaseUrl/core/UI.ps1" -UseBasicParsing -ErrorAction Stop).TrimStart([char]0xFEFF)) }
 catch { Write-Host "❌ Không tải được giao diện KATK: $($_.Exception.Message)" -ForegroundColor Red; return }
 $global:KATK_InMenu = $true
 
@@ -26,7 +26,7 @@ function Invoke-KATKModule {
 
     $url = "$global:KATK_BaseUrl/$Path"
     try {
-        $code = Invoke-RestMethod -Uri $url -UseBasicParsing -ErrorAction Stop
+        $code = (Invoke-RestMethod -Uri $url -UseBasicParsing -ErrorAction Stop).TrimStart([char]0xFEFF)
     }
     catch {
         Write-Host "❌ Không thể tải module, vui lòng kiểm tra mạng hoặc liên hệ ADMIN!" -ForegroundColor Red
