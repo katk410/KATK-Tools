@@ -294,10 +294,12 @@ function Set-Language {
 
     Write-Host "→ Đặt ngôn ngữ hiển thị..." -ForegroundColor Yellow
     try {
-        $langList = New-WinUserLanguageList -Language $LanguageTag
-        foreach ($existing in Get-WinUserLanguageList) {
-            if ($existing.LanguageTag -ne $LanguageTag) { $langList.Add($existing) }
+        $langList = Get-WinUserLanguageList
+        for ($i = $langList.Count - 1; $i -ge 0; $i--) {
+            $existingTag = $langList[$i].LanguageTag
+            if ($existingTag -eq $LanguageTag -or $LanguageTag -like "$existingTag-*") { $langList.RemoveAt($i) }
         }
+        $langList.Insert(0, $LanguageTag)
         Set-WinUserLanguageList -LanguageList $langList -Force -ErrorAction Stop
     } catch {
         Write-Host "⚠ Lỗi: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -369,17 +371,26 @@ function Set-Language {
     }
 
     Show-Step "Verify"
-    Write-Host "→ DISM /Online /Get-Intl:" -ForegroundColor Cyan
-    dism /online /Get-Intl | Select-String -Pattern "Default system UI language|System locale|Installed language"
-
-    Write-Host "`n→ Get-WinUserLanguageList:" -ForegroundColor Cyan
-    Get-WinUserLanguageList | Format-Table -AutoSize
-
-    Write-Host "`n→ Get-WinUILanguageOverride:" -ForegroundColor Cyan
-    Get-WinUILanguageOverride
-
-    Write-Host "`n→ Get-WinSystemLocale:" -ForegroundColor Cyan
-    Get-WinSystemLocale
+    $nls = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language" -ErrorAction SilentlyContinue
+    $override = Get-WinUILanguageOverride
+    $checks = @(
+        @{ Name = "Ngôn ngữ hệ thống (sau khởi động lại)"; Value = (Get-CurrentUILanguage); Expect = $LanguageTag },
+        @{ Name = "UI Language Override"; Value = $(if ($override) { $override.Name } else { "" }); Expect = $LanguageTag },
+        @{ Name = "Ngôn ngữ đầu danh sách"; Value = (Get-WinUserLanguageList)[0].LanguageTag; Expect = $LanguageTag },
+        @{ Name = "System Locale"; Value = (Get-WinSystemLocale).Name; Expect = $(if ($changeLocale) { $LanguageTag } else { $null }) },
+        @{ Name = "Nls InstallLanguage"; Value = $nls.InstallLanguage; Expect = $(if ($script:IsSingleLanguage) { $HexCode } else { $null }) }
+    )
+    foreach ($c in $checks) {
+        $label = $c.Name.PadRight(40)
+        if (-not $c.Expect) {
+            Write-Host "  • $label $($c.Value)" -ForegroundColor Gray
+        } elseif ($c.Value -eq $c.Expect) {
+            Write-Host "  ✔ $label $($c.Value)" -ForegroundColor Green
+        } else {
+            Write-Host "  ⚠ $label $($c.Value) (cần $($c.Expect))" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "  Ngôn ngữ đã cài: $((Get-InstalledLanguage -ErrorAction SilentlyContinue | ForEach-Object { $_.LanguageId }) -join ', ')" -ForegroundColor Gray
 
     Write-Host ""
     Register-PostRebootCheck $LanguageTag $DisplayName
