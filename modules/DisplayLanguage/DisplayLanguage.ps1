@@ -5,6 +5,7 @@ if (-not (Get-Command Show-KATKHeader -ErrorAction SilentlyContinue)) {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 
 $script:EstimatedSizeMB = 450
+$script:BasePackMB = 150
 $script:MaxAttempts = 3
 $script:WuPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
 $script:WuAuPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
@@ -163,7 +164,57 @@ function Show-InstallProgress([string]$Line) {
     Write-Host ("`r" + $Line.PadRight($width)) -NoNewline -ForegroundColor Cyan
 }
 
+function Get-LanguageDownloadSize([string]$LanguageTag) {
+    $fontMap = @{ 'zh-CN' = 'Hans'; 'zh-TW' = 'Hant'; 'ja-JP' = 'Jpan'; 'ko-KR' = 'Kore'; 'th-TH' = 'Thai' }
+    $total = 0.0
+    try {
+        $caps = Get-WindowsCapability -Online -ErrorAction Stop | Where-Object {
+            $_.State -ne 'Installed' -and (
+                $_.Name -like "Language.*~~~$LanguageTag~*" -or
+                ($fontMap.ContainsKey($LanguageTag) -and $_.Name -like "Language.Fonts.$($fontMap[$LanguageTag])~*")
+            )
+        }
+        foreach ($cap in $caps) {
+            $detail = Get-WindowsCapability -Online -Name $cap.Name -ErrorAction SilentlyContinue
+            if ($detail -and $detail.DownloadSize -gt 0) { $total += $detail.DownloadSize }
+        }
+    } catch {}
+    if ($total -gt 0) { return $total + $script:BasePackMB * 1MB }
+    return [double]($script:EstimatedSizeMB * 1MB)
+}
+
+function Get-DeliverySnapshot {
+    $map = @{}
+    try {
+        foreach ($s in Get-DeliveryOptimizationStatus -ErrorAction Stop) {
+            if ($s.FileId) { $map[$s.FileId] = @{ Size = [double]$s.FileSize; Done = [double]$s.TotalBytesDownloaded } }
+        }
+    } catch { return $null }
+    return $map
+}
+
+function Measure-DeliveryProgress($Baseline, $Current) {
+    $downloaded = 0.0
+    $remaining = 0.0
+    $files = 0
+    foreach ($id in $Current.Keys) {
+        $now = $Current[$id]
+        $before = if ($Baseline -and $Baseline.ContainsKey($id)) { $Baseline[$id].Done } else { 0 }
+        $delta = $now.Done - $before
+        if ($delta -le 0) { continue }
+        $files++
+        $downloaded += $delta
+        if ($now.Size -gt $now.Done) { $remaining += $now.Size - $now.Done }
+    }
+    return @{ Downloaded = $downloaded; Remaining = $remaining; Files = $files }
+}
+
 function Invoke-LanguageInstall([string]$LanguageTag) {
+    Write-Host "  Đang tính dung lượng cần tải..." -ForegroundColor DarkGray
+    $estimate = Get-LanguageDownloadSize $LanguageTag
+    $doBaseline = Get-DeliverySnapshot
+    $netBase = Get-ReceivedBytes
+
     $job = Start-Job -ScriptBlock {
         param($tag)
         Import-Module LanguagePackManagement -ErrorAction SilentlyContinue
@@ -172,36 +223,43 @@ function Invoke-LanguageInstall([string]$LanguageTag) {
 
     $spinner = '|', '/', '-', '\'
     $start = Get-Date
-    $baseBytes = Get-ReceivedBytes
-    $lastBytes = $baseBytes
+    $lastDownloaded = 0.0
     $lastTime = $start
     $speed = 0.0
-    $estimate = $script:EstimatedSizeMB * 1MB
     $tick = 0
 
     while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
         Start-Sleep -Milliseconds 1000
         $tick++
         $now = Get-Date
-        $bytes = Get-ReceivedBytes
+
+        $remaining = 0.0
+        $doNow = if ($null -ne $doBaseline) { Get-DeliverySnapshot } else { $null }
+        $doProgress = if ($doNow) { Measure-DeliveryProgress $doBaseline $doNow } else { $null }
+        if ($doProgress -and $doProgress.Files -gt 0) {
+            $downloaded = $doProgress.Downloaded
+            $remaining = $doProgress.Remaining
+        } else {
+            $downloaded = [math]::Max(0, (Get-ReceivedBytes) - $netBase)
+        }
+
         $interval = ($now - $lastTime).TotalSeconds
-        if ($interval -gt 0 -and $bytes -ge $lastBytes) {
-            $current = ($bytes - $lastBytes) / $interval
+        if ($interval -gt 0 -and $downloaded -ge $lastDownloaded) {
+            $current = ($downloaded - $lastDownloaded) / $interval
             $speed = if ($speed -eq 0) { $current } else { $speed * 0.7 + $current * 0.3 }
         }
-        $lastBytes = $bytes
+        $lastDownloaded = $downloaded
         $lastTime = $now
 
-        $downloaded = [math]::Max(0, $bytes - $baseBytes)
+        $total = [math]::Max($estimate, $downloaded + $remaining)
         $elapsed = ($now - $start).TotalSeconds
-        if ($downloaded -gt $estimate) { $estimate = $downloaded * 1.1 }
-        $percent = [math]::Min(99, [math]::Floor($downloaded / $estimate * 100))
+        $percent = [math]::Min(99, [math]::Floor($downloaded / $total * 100))
         $avgSpeed = if ($elapsed -gt 0) { $downloaded / $elapsed } else { 0 }
-        $eta = if ($avgSpeed -gt 1KB) { Format-Duration (($estimate - $downloaded) / $avgSpeed) } else { "--:--" }
+        $rate = if ($speed -gt 1KB) { $speed } else { $avgSpeed }
+        $eta = if ($rate -gt 1KB) { Format-Duration (($total - $downloaded) / $rate) } else { "--:--" }
 
         $bar = ('█' * [math]::Floor($percent / 5)).PadRight(20, '░')
-        $spin = $spinner[$tick % 4]
-        Show-InstallProgress (" $spin $bar ~$percent%  $(Format-Size $downloaded)  $(Format-Size $speed)/s  Đã chạy $(Format-Duration $elapsed)  Còn ~$eta")
+        Show-InstallProgress (" $($spinner[$tick % 4]) $bar $("$percent%".PadLeft(3))  ·  Đã chạy $(Format-Duration $elapsed)  ·  $(Format-Size $speed)/s  ·  Còn ~$eta")
     }
     Write-Host ""
 
@@ -228,7 +286,8 @@ Add-Type -AssemblyName PresentationFramework
 `$target = '$LanguageTag'
 `$sys = try { Get-SystemPreferredUILanguage } catch { '' }
 `$ui = (Get-UICulture).Name
-if (`$sys -eq `$target -or `$ui -eq `$target) {
+function Test-Match(`$v) { `$v -and (`$v -eq `$target -or `$target -like "`$v-*" -or `$v -like "`$target-*") }
+if ((Test-Match `$sys) -or (Test-Match `$ui)) {
     [System.Windows.MessageBox]::Show("Đã chuyển ngôn ngữ hiển thị sang $DisplayName (`$target) thành công.``n``nMột vài ứng dụng có sẵn sẽ tự đổi ngôn ngữ sau khi Microsoft Store cập nhật.", 'KATK Tools', 'OK', 'Information') | Out-Null
 } else {
     [System.Windows.MessageBox]::Show("Chưa chuyển được sang $DisplayName (`$target).``nNgôn ngữ hệ thống: `$sys``nNgôn ngữ giao diện: `$ui``n``nHãy khởi động lại máy thêm một lần, nếu vẫn chưa được hãy chạy lại tính năng trong KATK Tools.", 'KATK Tools', 'OK', 'Warning') | Out-Null
@@ -288,9 +347,7 @@ function Set-Language {
             Wait-KATKBack
             return $false
         }
-        Write-Host "✔ Cài đặt thành công sau $(Format-Duration $result.Duration.TotalSeconds)" -ForegroundColor Green
-        Write-Host "  Thành phần: $($result.Installed.LanguagePacks)" -ForegroundColor DarkGray
-    }
+        Write-Host "✔ Cài đặt thành công sau $(Format-Duration $result.Duration.TotalSeconds)" -ForegroundColor Green    }
 
     Write-Host "→ Đặt ngôn ngữ hiển thị..." -ForegroundColor Yellow
     try {
@@ -384,7 +441,7 @@ function Set-Language {
         $label = $c.Name.PadRight(40)
         if (-not $c.Expect) {
             Write-Host "  • $label $($c.Value)" -ForegroundColor Gray
-        } elseif ($c.Value -eq $c.Expect) {
+        } elseif ($c.Value -and ($c.Value -eq $c.Expect -or $c.Expect -like "$($c.Value)-*" -or $c.Value -like "$($c.Expect)-*")) {
             Write-Host "  ✔ $label $($c.Value)" -ForegroundColor Green
         } else {
             Write-Host "  ⚠ $label $($c.Value) (cần $($c.Expect))" -ForegroundColor Yellow
