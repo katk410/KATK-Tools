@@ -102,20 +102,21 @@ function Invoke-InstallSoftware {
 
     $katkBase = if ($global:KATK_BaseUrl) { $global:KATK_BaseUrl } else { "https://raw.githubusercontent.com/katk410/KATK-Tools/stable" }
     $command = "`$global:KATK_BaseUrl='$katkBase'; irm $katkBase/modules/AutoSetup/AppModule.ps1 | iex"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
 
     try {
         $wtPath = Get-Command "wt.exe" -ErrorAction SilentlyContinue
         if ($wtPath) {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = "wt.exe"
-            $psi.Arguments = "-w -1 nt -p `"Windows PowerShell`" powershell.exe -NoExit -Command `"$command`""
+            $psi.Arguments = "-w -1 nt -p `"Windows PowerShell`" powershell.exe -NoExit -EncodedCommand $encoded"
             $psi.Verb = "RunAs"
             $psi.UseShellExecute = $true
             [System.Diagnostics.Process]::Start($psi) | Out-Null
         } else {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = "powershell.exe"
-            $psi.Arguments = "-NoExit -Command `"$command`""
+            $psi.Arguments = "-NoExit -EncodedCommand $encoded"
             $psi.Verb = "RunAs"
             $psi.UseShellExecute = $true
             [System.Diagnostics.Process]::Start($psi) | Out-Null
@@ -526,9 +527,16 @@ Reset-TimeAndRegionAuto
 
 Show-KATKBox "🖥️  THÔNG TIN HỆ THỐNG" -Color Yellow -TextColor White
 
-$cimClasses = @('Win32_ComputerSystem','Win32_BIOS','Win32_Processor','Win32_PhysicalMemory','Win32_DiskDrive','Win32_VideoController')
+$cimClasses = @('Win32_ComputerSystem','Win32_BIOS','Win32_Processor','Win32_PhysicalMemory','Win32_DiskDrive')
 $cimData = foreach ($class in $cimClasses) {
     Get-CimInstance -ClassName $class -ErrorAction SilentlyContinue
+}
+
+function Get-KATKClassDeviceNames([string]$ClassGuid) {
+    Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\$ClassGuid" -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -match '^\d{4}$' } |
+        ForEach-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DriverDesc } |
+        Where-Object { $_ } | Sort-Object -Unique
 }
 
 $computer   = $cimData | Where-Object { $_.CimClass.CimClassName -eq 'Win32_ComputerSystem' } | Select-Object -First 1
@@ -536,7 +544,7 @@ $bios       = $cimData | Where-Object { $_.CimClass.CimClassName -eq 'Win32_BIOS
 $cpu        = $cimData | Where-Object { $_.CimClass.CimClassName -eq 'Win32_Processor' } | Select-Object -First 1
 $ramModules = $cimData | Where-Object { $_.CimClass.CimClassName -eq 'Win32_PhysicalMemory' }
 $diskDrives = $cimData | Where-Object { $_.CimClass.CimClassName -eq 'Win32_DiskDrive' }
-$videoCards = $cimData | Where-Object { $_.CimClass.CimClassName -eq 'Win32_VideoController' }
+$videoCards = Get-KATKClassDeviceNames '{4d36e968-e325-11ce-bfc1-08002be10318}'
 
 $computerName = $env:COMPUTERNAME
 $model = if ($computer) { $computer.Model } else { "N/A" }
@@ -590,7 +598,7 @@ $dedicatedGPUs = @()
 $integratedGPUs = @()
 if ($videoCards) {
     foreach ($gpu in $videoCards) {
-        $gpuName = $gpu.Name.Trim()
+        $gpuName = $gpu.Trim()
         if ($gpuName.Length -gt 90) { $gpuName = $gpuName.Substring(0,88) + "..." }
         if ($gpuName -match "NVIDIA|GeForce|RTX|GTX|AMD Radeon RX|AMD FirePro") {
             $dedicatedGPUs += $gpuName
@@ -615,12 +623,8 @@ $graphicsInfo = $graphicsParts -join " | "
 
 try {
     $realNPUs = @()
-    $npuPattern = "NPU|Neural|AI|VPU|IPU|AI Boost|AI Engine|Hexagon"
-    $npuDevices = Get-CimInstance -ClassName Win32_PnPEntity -Filter "Name LIKE '%$npuPattern%' AND ConfigManagerErrorCode = 0" -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -notmatch "HID|USB|Input|Virtual|Audio|Camera|Bluetooth|Firmware|Display" }
-    foreach ($npu in $npuDevices) {
-        if ($npu.Name) { $realNPUs += $npu.Name.Trim() }
-    }
+    $npuDevices = Get-KATKClassDeviceNames '{f01a9d53-3ff6-48d2-9f97-c8a7004be10c}'
+    foreach ($npu in $npuDevices) { $realNPUs += $npu.Trim() }
     if ($realNPUs.Count -eq 0 -and $cpu) {
         $cpuName = $cpu.Name
         if ($cpuName -match "Intel\(R\) Core\(TM\) Ultra") { $realNPUs += "Intel AI Boost (từ CPU)" }
@@ -638,7 +642,7 @@ try {
 Write-Host " • Thông tin kết nối mạng:" -ForegroundColor White
 $activeAdapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "VMware|Virtual|Hyper-V" }
 $ssid = try { (netsh wlan show interfaces | Select-String "SSID" | Select-Object -First 1).ToString().Split(":")[1].Trim() } catch { "" }
-$publicIP = try { Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 5 -ErrorAction Stop } catch { "Không lấy được IP Public" }
+$publicIP = try { Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 3 -ErrorAction Stop } catch { "Không lấy được IP Public" }
 
 $wifiDetails = ""
 foreach ($adapter in $activeAdapters) {

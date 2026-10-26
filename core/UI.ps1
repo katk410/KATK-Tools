@@ -7,7 +7,7 @@ function global:Show-KATKHeader {
     )
 
     $minWidth = 47
-    $longest = [Math]::Max($Title.Length, $Subtitle.Length)
+    $longest = [Math]::Max((Get-KATKDisplayWidth $Title), (Get-KATKDisplayWidth $Subtitle))
     $width = [Math]::Max($minWidth, $longest + 6)
 
     Write-Host ""
@@ -21,8 +21,23 @@ function global:Show-KATKHeader {
     Write-Host ("╚" + ("═" * $width) + "╝") -ForegroundColor Cyan
 }
 
+function global:Get-KATKDisplayWidth([string]$Text) {
+    $w = 0
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $c = [int]$Text[$i]
+        if ([char]::IsHighSurrogate($Text[$i])) { $w += 2; $i++; continue }
+        if ($c -eq 0xFE0F -or $c -eq 0xFE0E -or $c -eq 0x200D -or ($c -ge 0x0300 -and $c -le 0x036F)) { continue }
+        if (($c -ge 0x2600 -and $c -le 0x27BF) -or ($c -ge 0x2B00 -and $c -le 0x2BFF)) {
+            if ($i + 1 -lt $Text.Length -and [int]$Text[$i + 1] -eq 0xFE0F) { $w += 2 } elseif ($c -in 0x26A1,0x2705,0x274C,0x26D4,0x2B50,0x23F3) { $w += 2 } else { $w += 1 }
+            continue
+        }
+        $w += 1
+    }
+    return $w
+}
+
 function global:Get-KATKCenter([string]$Text, [int]$Width) {
-    $padding = [Math]::Max(0, $Width - $Text.Length)
+    $padding = [Math]::Max(0, $Width - (Get-KATKDisplayWidth $Text))
     $left = [math]::Floor($padding / 2)
     return (" " * $left) + $Text + (" " * ($padding - $left))
 }
@@ -34,7 +49,7 @@ function global:Show-KATKBox {
         [string]$TextColor = "White"
     )
     $Text = $Text.Trim()
-    $width = [Math]::Max(47, $Text.Length + 6)
+    $width = [Math]::Max(47, (Get-KATKDisplayWidth $Text) + 6)
     Write-Host ""
     Write-Host ("╔" + ("═" * $width) + "╗") -ForegroundColor $Color
     Write-Host "║" -ForegroundColor $Color -NoNewline
