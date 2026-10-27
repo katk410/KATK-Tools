@@ -138,6 +138,30 @@ function Restore-UpdatePrerequisites($State) {
     }
 }
 
+function Test-PendingReboot {
+    $keys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+    )
+    foreach ($k in $keys) { if (Test-Path $k) { return $true } }
+    return $false
+}
+
+function Test-PendingRebootError([string]$Message) {
+    return $Message -match '-2146498554|0x800F0806'
+}
+
+function Request-KATKRestart {
+    if (Read-YesNo "Khởi động lại ngay?") {
+        Write-Host "Máy sẽ khởi động lại sau 10 giây..." -ForegroundColor Yellow
+        shutdown /r /t 10
+    } else {
+        Write-Host "Hãy tự khởi động lại máy sau khi lưu công việc." -ForegroundColor Gray
+        Wait-KATKBack
+    }
+}
+
 function Test-Prerequisites {
     $ok = $true
 
@@ -324,15 +348,26 @@ function Set-Language {
     if ($installed) {
         Write-Host "✔ Gói ngôn ngữ $LanguageTag đã có sẵn, bỏ qua bước tải." -ForegroundColor Green
     } else {
+        if (Test-PendingReboot) {
+            Write-Host "❌ Windows đang chờ khởi động lại để hoàn tất cập nhật hoặc cài đặt trước đó." -ForegroundColor Red
+            Write-Host "  Cài gói ngôn ngữ lúc này sẽ lỗi 0x800F0806. Hãy khởi động lại máy rồi chạy lại tính năng này." -ForegroundColor DarkGray
+            Request-KATKRestart
+            return $false
+        }
         $wuState = Enable-UpdatePrerequisites
         try {
             $result = $null
+            $needReboot = $false
             for ($attempt = 1; $attempt -le $script:MaxAttempts; $attempt++) {
                 Write-Host "→ Đang cài gói ngôn ngữ và Local Experience Pack (lần $attempt/$script:MaxAttempts)..." -ForegroundColor Yellow
                 Write-Host "  Dung lượng và thời gian chỉ là ước lượng. Vui lòng không đóng cửa sổ trong quá trình chờ!" -ForegroundColor DarkGray
                 $result = Invoke-LanguageInstall $LanguageTag
                 if ($result.Success) { break }
                 Write-Host "⚠ Lần $attempt thất bại: $($result.Message)" -ForegroundColor Yellow
+                if (Test-PendingRebootError $result.Message) {
+                    $needReboot = $true
+                    break
+                }
                 if ($attempt -lt $script:MaxAttempts) {
                     Write-Host "  Thử lại sau 10 giây..." -ForegroundColor DarkGray
                     Start-Sleep -Seconds 10
@@ -341,13 +376,20 @@ function Set-Language {
         } finally {
             Restore-UpdatePrerequisites $wuState
         }
+        if ($needReboot) {
+            Write-Host "❌ Windows đang có bản cập nhật hoặc gói cài đặt chờ khởi động lại (0x800F0806)." -ForegroundColor Red
+            Write-Host "  Một phần gói ngôn ngữ có thể đã được cài. Hãy khởi động lại máy rồi chạy lại tính năng này để cài nốt." -ForegroundColor DarkGray
+            Request-KATKRestart
+            return $false
+        }
         if (-not $result.Success) {
             Write-Host "❌ Không cài được gói ngôn ngữ sau $script:MaxAttempts lần thử." -ForegroundColor Red
             Write-Host "  Hãy kiểm tra kết nối mạng, mở Windows Update xem có lỗi không, rồi chạy lại." -ForegroundColor DarkGray
             Wait-KATKBack
             return $false
         }
-        Write-Host "✔ Cài đặt thành công sau $(Format-Duration $result.Duration.TotalSeconds)" -ForegroundColor Green    }
+        Write-Host "✔ Cài đặt thành công sau $(Format-Duration $result.Duration.TotalSeconds)" -ForegroundColor Green
+    }
 
     Write-Host "→ Đặt ngôn ngữ hiển thị..." -ForegroundColor Yellow
     try {
@@ -458,13 +500,7 @@ function Set-Language {
     if ($script:IsSingleLanguage) {
         Write-Host "Lưu ý: sau mỗi bản cập nhật Windows lớn (ví dụ 24H2 → 25H2), máy có thể quay về ngôn ngữ gốc, khi đó hãy chạy lại tính năng này." -ForegroundColor DarkGray
     }
-    if (Read-YesNo "Khởi động lại ngay?") {
-        Write-Host "Máy sẽ khởi động lại sau 10 giây..." -ForegroundColor Yellow
-        shutdown /r /t 10
-    } else {
-        Write-Host "Hãy tự khởi động lại máy sau khi lưu công việc." -ForegroundColor Gray
-        Wait-KATKBack
-    }
+    Request-KATKRestart
     return $true
 }
 
