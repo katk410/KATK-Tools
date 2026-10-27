@@ -1,5 +1,35 @@
 Add-Type -AssemblyName System.Net.Http
 
+function Format-OfficeSize([double]$Bytes) {
+    if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return "{0:N1} MB" -f ($Bytes / 1MB) }
+    return "{0:N0} KB" -f ($Bytes / 1KB)
+}
+
+function Format-OfficeDuration([double]$Seconds) {
+    $t = [TimeSpan]::FromSeconds([math]::Max(0, $Seconds))
+    if ($t.TotalHours -ge 1) { return "{0}:{1:D2}:{2:D2}" -f [int][math]::Floor($t.TotalHours), $t.Minutes, $t.Seconds }
+    return "{0:D2}:{1:D2}" -f $t.Minutes, $t.Seconds
+}
+
+function Show-OfficeProgress([double]$Downloaded, [double]$Total, [double]$Elapsed, [double]$Speed, [int]$Tick) {
+    $spinner = '|', '/', '-', '\'
+    $avgSpeed = if ($Elapsed -gt 0) { $Downloaded / $Elapsed } else { 0 }
+    $rate = if ($Speed -gt 1KB) { $Speed } else { $avgSpeed }
+    if ($Total -gt 0) {
+        $Total = [math]::Max($Total, $Downloaded)
+        $percent = [math]::Min(99, [math]::Floor($Downloaded / $Total * 100))
+        $eta = if ($rate -gt 1KB) { Format-OfficeDuration (($Total - $Downloaded) / $rate) } else { "--:--" }
+        $bar = ('█' * [math]::Floor($percent / 5)).PadRight(20, '░')
+        $line = " $($spinner[$Tick % 4]) $bar $("$percent%".PadLeft(3))  ·  $(Format-OfficeSize $Downloaded) / $(Format-OfficeSize $Total)  ·  Đã chạy $(Format-OfficeDuration $Elapsed)  ·  $(Format-OfficeSize $Speed)/s  ·  Còn ~$eta"
+    } else {
+        $line = " $($spinner[$Tick % 4]) Đã tải $(Format-OfficeSize $Downloaded)  ·  Đã chạy $(Format-OfficeDuration $Elapsed)  ·  $(Format-OfficeSize $Speed)/s"
+    }
+    $width = [math]::Max(40, $Host.UI.RawUI.WindowSize.Width - 1)
+    if ($line.Length -gt $width) { $line = $line.Substring(0, $width) }
+    Write-Host ("`r" + $line.PadRight($width)) -NoNewline -ForegroundColor Cyan
+}
+
 function Test-OfficeInstalled {
     $regPaths = @(
         "HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration",
@@ -220,31 +250,29 @@ function Install-OfficeWithODT {
         $proc = Start-Process -FilePath $setupExe -ArgumentList "/download `"$configDownload`"" -PassThru -WindowStyle Hidden
         Pop-Location
 
-        $totalMB = 2500
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $lastSize = 0
-        $lastCheck = Get-Date
+        $totalBytes = 2500MB
+        $start = Get-Date
+        $lastSize = 0.0
+        $lastTime = $start
+        $speed = 0.0
+        $tick = 0
 
         while (-not $proc.HasExited) {
-            Start-Sleep -Milliseconds 500
-            if (Test-Path $sourceDir) {
-                $currentSize = (Get-ChildItem $sourceDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
-                if ($currentSize -gt 0) {
-                    $currentMB = [math]::Round($currentSize / 1MB, 2)
-                    $percent = [math]::Min(100, [math]::Round(($currentSize / ($totalMB * 1MB)) * 100, 2))
-                    $elapsed = $sw.Elapsed.TotalSeconds
-                    if ($elapsed -gt 1) {
-                        $speed = ($currentSize - $lastSize) / ($elapsed - $lastCheck.TotalSeconds)
-                        $speedMB = [math]::Round($speed / 1MB, 2)
-                        Write-Host -NoNewline "`r→ Tiến trình: $currentMB MB / ~$totalMB MB ($percent%) - $speedMB MB/s    " -ForegroundColor Cyan
-                    }
-                    $lastSize = $currentSize
-                    $lastCheck = Get-Date
-                }
+            Start-Sleep -Milliseconds 1000
+            $tick++
+            $now = Get-Date
+            $currentSize = [double]((Get-ChildItem $sourceDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum)
+            $interval = ($now - $lastTime).TotalSeconds
+            if ($interval -gt 0 -and $currentSize -ge $lastSize) {
+                $current = ($currentSize - $lastSize) / $interval
+                $speed = if ($speed -eq 0) { $current } else { $speed * 0.7 + $current * 0.3 }
             }
+            $lastSize = $currentSize
+            $lastTime = $now
+            Show-OfficeProgress $currentSize $totalBytes ($now - $start).TotalSeconds $speed $tick
         }
         $proc.WaitForExit()
-        Write-Host "`r                                                           `r" -NoNewline
+        Write-Host ""
         if ($proc.ExitCode -ne 0) {
             throw "Lỗi khi tải gói Office (mã: $($proc.ExitCode))"
         }
@@ -348,42 +376,35 @@ function Install-Office {
                 $totalBytes = $response.Content.Headers.ContentLength
                 if (-not $totalBytes) { $totalBytes = 0 }
 
-                $buffer = New-Object byte[] 8192
+                $buffer = New-Object byte[] 81920
                 $stream = $response.Content.ReadAsStreamAsync().Result
                 $fileStream = [System.IO.File]::OpenWrite($imgFile)
                 $totalRead = 0
-                $lastPercent = -1
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $lastSpeedUpdate = 0
-                $speedBytes = 0
+                $lastUpdate = 0.0
+                $lastRead = 0
+                $speed = 0.0
+                $tick = 0
                 do {
                     $read = $stream.Read($buffer, 0, $buffer.Length)
                     if ($read -eq 0) { break }
                     $fileStream.Write($buffer, 0, $read)
                     $totalRead += $read
-                    $speedBytes += $read
                     $elapsed = $sw.Elapsed.TotalSeconds
-                    if ($elapsed - $lastSpeedUpdate -ge 1) {
-                        $speed = $speedBytes / ($elapsed - $lastSpeedUpdate)
-                        $speedMB = [math]::Round($speed / 1MB, 2)
-                        $lastSpeedUpdate = $elapsed
-                        $speedBytes = 0
-                        if ($totalBytes -gt 0) {
-                            $percent = [math]::Round(($totalRead / $totalBytes) * 100, 2)
-                            $transferredMB = [math]::Round($totalRead / 1MB, 2)
-                            $totalMB = [math]::Round($totalBytes / 1MB, 2)
-                            Write-Host -NoNewline "`r→ Tiến trình: $transferredMB MB / $totalMB MB ($percent%) - $speedMB MB/s    " -ForegroundColor Cyan
-                        } else {
-                            $transferredMB = [math]::Round($totalRead / 1MB, 2)
-                            Write-Host -NoNewline "`r→ Đã tải: $transferredMB MB - $speedMB MB/s    " -ForegroundColor Cyan
-                        }
+                    if ($elapsed - $lastUpdate -ge 1) {
+                        $current = ($totalRead - $lastRead) / ($elapsed - $lastUpdate)
+                        $speed = if ($speed -eq 0) { $current } else { $speed * 0.7 + $current * 0.3 }
+                        $lastUpdate = $elapsed
+                        $lastRead = $totalRead
+                        $tick++
+                        Show-OfficeProgress $totalRead $totalBytes $elapsed $speed $tick
                     }
                 } while ($true)
                 $fileStream.Close()
                 $stream.Close()
                 $response.Dispose()
                 $httpClient.Dispose()
-                Write-Host "`r                                                           `r" -NoNewline
+                Write-Host ""
                 Write-Host "✔ TẢI HOÀN TẤT!" -ForegroundColor Green
                 if (Test-Path $imgFile) {
                     $fileName = Split-Path $imgFile -Leaf
