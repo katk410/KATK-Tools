@@ -393,12 +393,7 @@ function Set-Language {
 
     Write-Host "→ Đặt ngôn ngữ hiển thị..." -ForegroundColor Yellow
     try {
-        $langList = Get-WinUserLanguageList
-        for ($i = $langList.Count - 1; $i -ge 0; $i--) {
-            $existingTag = $langList[$i].LanguageTag
-            if ($existingTag -eq $LanguageTag -or $LanguageTag -like "$existingTag-*") { $langList.RemoveAt($i) }
-        }
-        $langList.Insert(0, $LanguageTag)
+        $langList = New-WinUserLanguageList -Language $LanguageTag
         Set-WinUserLanguageList -LanguageList $langList -Force -ErrorAction Stop
     } catch {
         Write-Host "⚠ Lỗi: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -409,28 +404,6 @@ function Set-Language {
         Set-WinUILanguageOverride -Language $LanguageTag -ErrorAction Stop
     } catch {
         Write-Host "⚠ Lỗi: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-
-    if (Get-Command Set-SystemPreferredUILanguage -ErrorAction SilentlyContinue) {
-        Write-Host "→ Đặt ngôn ngữ hệ thống..." -ForegroundColor Yellow
-        $sysSet = $false
-        foreach ($tag in @($LanguageTag, $LanguageTag.Split('-')[0]) | Select-Object -Unique) {
-            try {
-                Set-SystemPreferredUILanguage -Language $tag -ErrorAction Stop
-                $sysSet = $true
-                break
-            } catch {}
-        }
-        if (-not $sysSet) {
-            try {
-                $muiPath = "HKLM:\SYSTEM\CurrentControlSet\Control\MUI\Settings"
-                if (-not (Test-Path $muiPath)) { New-Item -Path $muiPath -Force | Out-Null }
-                Set-ItemProperty -Path $muiPath -Name "PreferredUILanguages" -Value ([string[]]@($LanguageTag)) -Type MultiString -ErrorAction Stop
-                Write-Host "✔ Đã đặt qua registry MUI (Windows từ chối lệnh trực tiếp)." -ForegroundColor Green
-            } catch {
-                Write-Host "⚠ Lỗi: $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-        }
     }
 
     if ($changeLocale) {
@@ -446,6 +419,9 @@ function Set-Language {
 
     Write-Host "→ Cập nhật registry..." -ForegroundColor Yellow
     $regs = @(
+        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "Default", $HexCode),
+        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguage", $HexCode),
+        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguageFallback", $HexCode),
         @("HKCU\Control Panel\International", "LocaleName", $LanguageTag),
         @("HKCU\Control Panel\International", "UserLocale", $LanguageTag),
         @("HKCU\Control Panel\Desktop", "UserLocale", $LanguageTag),
@@ -456,13 +432,6 @@ function Set-Language {
         @("HKU\.DEFAULT\Control Panel\International", "UserLocale", $LanguageTag),
         @("HKU\.DEFAULT\Software\Microsoft\Windows NT\CurrentVersion\Winlogon", "DefaultLanguage", $HexCode)
     )
-    if ($script:IsSingleLanguage) {
-        $regs += @(
-            @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "Default", $HexCode),
-            @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguage", $HexCode),
-            @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguageFallback", $HexCode)
-        )
-    }
     $failed = 0
     foreach ($r in $regs) {
         if (-not (Set-RegValue $r[0] $r[1] $r[2])) { $failed++ }
@@ -485,14 +454,12 @@ function Set-Language {
     Show-Step "Verify"
     $nls = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language" -ErrorAction SilentlyContinue
     $override = Get-WinUILanguageOverride
-    $muiPending = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\MUI\Settings" -Name PreferredUILanguages -ErrorAction SilentlyContinue).PreferredUILanguages | Select-Object -First 1
-    $sysLang = if ($muiPending) { $muiPending } else { Get-CurrentUILanguage }
     $checks = @(
-        @{ Name = "Ngôn ngữ hệ thống (sau khởi động lại)"; Value = $sysLang; Expect = $LanguageTag },
+        @{ Name = "Nls Default"; Value = $nls.Default; Expect = $HexCode },
         @{ Name = "UI Language Override"; Value = $(if ($override) { $override.Name } else { "" }); Expect = $LanguageTag },
         @{ Name = "Ngôn ngữ đầu danh sách"; Value = (Get-WinUserLanguageList)[0].LanguageTag; Expect = $LanguageTag },
         @{ Name = "System Locale"; Value = (Get-WinSystemLocale).Name; Expect = $(if ($changeLocale) { $LanguageTag } else { $null }) },
-        @{ Name = "Nls InstallLanguage"; Value = $nls.InstallLanguage; Expect = $(if ($script:IsSingleLanguage) { $HexCode } else { $null }) }
+        @{ Name = "Nls InstallLanguage"; Value = $nls.InstallLanguage; Expect = $HexCode }
     )
     foreach ($c in $checks) {
         $label = $c.Name.PadRight(40)
