@@ -413,10 +413,23 @@ function Set-Language {
 
     if (Get-Command Set-SystemPreferredUILanguage -ErrorAction SilentlyContinue) {
         Write-Host "→ Đặt ngôn ngữ hệ thống..." -ForegroundColor Yellow
-        try {
-            Set-SystemPreferredUILanguage -Language $LanguageTag -ErrorAction Stop
-        } catch {
-            Write-Host "⚠ Lỗi: $($_.Exception.Message)" -ForegroundColor Yellow
+        $sysSet = $false
+        foreach ($tag in @($LanguageTag, $LanguageTag.Split('-')[0]) | Select-Object -Unique) {
+            try {
+                Set-SystemPreferredUILanguage -Language $tag -ErrorAction Stop
+                $sysSet = $true
+                break
+            } catch {}
+        }
+        if (-not $sysSet) {
+            try {
+                $muiPath = "HKLM:\SYSTEM\CurrentControlSet\Control\MUI\Settings"
+                if (-not (Test-Path $muiPath)) { New-Item -Path $muiPath -Force | Out-Null }
+                Set-ItemProperty -Path $muiPath -Name "PreferredUILanguages" -Value ([string[]]@($LanguageTag)) -Type MultiString -ErrorAction Stop
+                Write-Host "✔ Đã đặt qua registry MUI (Windows từ chối lệnh trực tiếp)." -ForegroundColor Green
+            } catch {
+                Write-Host "⚠ Lỗi: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
     }
 
@@ -472,8 +485,10 @@ function Set-Language {
     Show-Step "Verify"
     $nls = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language" -ErrorAction SilentlyContinue
     $override = Get-WinUILanguageOverride
+    $muiPending = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\MUI\Settings" -Name PreferredUILanguages -ErrorAction SilentlyContinue).PreferredUILanguages | Select-Object -First 1
+    $sysLang = if ($muiPending) { $muiPending } else { Get-CurrentUILanguage }
     $checks = @(
-        @{ Name = "Ngôn ngữ hệ thống (sau khởi động lại)"; Value = (Get-CurrentUILanguage); Expect = $LanguageTag },
+        @{ Name = "Ngôn ngữ hệ thống (sau khởi động lại)"; Value = $sysLang; Expect = $LanguageTag },
         @{ Name = "UI Language Override"; Value = $(if ($override) { $override.Name } else { "" }); Expect = $LanguageTag },
         @{ Name = "Ngôn ngữ đầu danh sách"; Value = (Get-WinUserLanguageList)[0].LanguageTag; Expect = $LanguageTag },
         @{ Name = "System Locale"; Value = (Get-WinSystemLocale).Name; Expect = $(if ($changeLocale) { $LanguageTag } else { $null }) },
