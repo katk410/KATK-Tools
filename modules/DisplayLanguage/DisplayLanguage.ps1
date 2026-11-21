@@ -15,9 +15,6 @@ function Show-Menu {
     Show-KATKHeader "THAY ĐỔI NGÔN NGỮ HIỂN THỊ WINDOWS"
     Write-Host "`nPhiên bản: $script:EditionName" -ForegroundColor Cyan
     Write-Host "Ngôn ngữ hiện tại: $script:CurrentUILanguage" -ForegroundColor Cyan
-    if (-not $script:IsSingleLanguage) {
-        Write-Host "    Máy không phải Home Single Language, sẽ bỏ qua bước ghi đè ngôn ngữ hệ thống." -ForegroundColor DarkGray
-    }
     Write-Host "`nLƯU Ý:" -ForegroundColor Yellow
     Write-Host "    Tính năng chưa hỗ trợ kiến trúc Windows ARM" -ForegroundColor White
     Write-Host "    Sau khi hệ thống hoàn tất quá trình cài đặt, vui lòng khởi động lại máy!`n" -ForegroundColor White
@@ -32,10 +29,15 @@ function Show-Menu {
 }
 
 function Test-InternetConnection {
-    try {
-        Invoke-WebRequest -Uri "https://www.microsoft.com" -TimeoutSec 5 -UseBasicParsing | Out-Null
-        return $true
-    } catch { return $false }
+    foreach ($url in @("https://www.microsoft.com", "https://go.microsoft.com", "http://www.msftconnecttest.com/connecttest.txt")) {
+        for ($i = 0; $i -lt 2; $i++) {
+            try {
+                Invoke-WebRequest -Uri $url -TimeoutSec 15 -UseBasicParsing | Out-Null
+                return $true
+            } catch { Start-Sleep -Seconds 2 }
+        }
+    }
+    return $false
 }
 
 function Test-IsArm {
@@ -141,11 +143,14 @@ function Restore-UpdatePrerequisites($State) {
 function Test-PendingReboot {
     $keys = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending",
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
     )
     foreach ($k in $keys) { if (Test-Path $k) { return $true } }
     return $false
+}
+
+function Test-ServicingBusy {
+    return (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending")
 }
 
 function Test-PendingRebootError([string]$Message) {
@@ -233,6 +238,31 @@ function Measure-DeliveryProgress($Baseline, $Current) {
     return @{ Downloaded = $downloaded; Remaining = $remaining; Files = $files }
 }
 
+function Get-InstalledLanguageList {
+    $list = @()
+    try { foreach ($l in (Get-InstalledLanguage -ErrorAction Stop)) { $list += $l } } catch {}
+    return $list
+}
+
+function Get-MissingUIPacks([string]$LanguageTag) {
+    $lang = Get-InstalledLanguageList | Where-Object { $_.LanguageId -eq $LanguageTag } | Select-Object -First 1
+    if ($lang -and "$($lang.LanguagePacks)" -match 'LpCab|Lxp') { return @() }
+    return @('LpCab/LXP')
+}
+
+function Get-NlsBase([string]$LanguageTag, [string]$HexCode) {
+    $root = "HKLM:\SYSTEM\CurrentControlSet\Control\MUI\UILanguages"
+    $info = Get-ItemProperty "$root\$LanguageTag" -ErrorAction SilentlyContinue
+    if (-not $info -or -not ($info.Type -band 0x4) -or -not $info.DefaultFallback) {
+        return @{ Tag = $LanguageTag; Hex = $HexCode; IsLip = $false }
+    }
+    $parent = Get-ItemProperty "$root\$($info.DefaultFallback)" -ErrorAction SilentlyContinue
+    if (-not $parent -or -not $parent.LCID) {
+        return @{ Tag = $LanguageTag; Hex = $HexCode; IsLip = $false }
+    }
+    return @{ Tag = $info.DefaultFallback; Hex = ('{0:X4}' -f [int]$parent.LCID); IsLip = $true }
+}
+
 function Invoke-LanguageInstall([string]$LanguageTag) {
     Write-Host "  Đang tính dung lượng cần tải..." -ForegroundColor DarkGray
     $estimate = Get-LanguageDownloadSize $LanguageTag
@@ -242,7 +272,7 @@ function Invoke-LanguageInstall([string]$LanguageTag) {
     $job = Start-Job -ScriptBlock {
         param($tag)
         Import-Module LanguagePackManagement -ErrorAction SilentlyContinue
-        Install-Language -Language $tag -CopyToSettings -ErrorAction Stop | Out-Null
+        Install-Language -Language $tag -ExcludeFeatures -ErrorAction Stop | Out-Null
     } -ArgumentList $LanguageTag
 
     $spinner = '|', '/', '-', '\'
@@ -251,6 +281,8 @@ function Invoke-LanguageInstall([string]$LanguageTag) {
     $lastTime = $start
     $speed = 0.0
     $tick = 0
+    $percent = 0
+    $idleSince = $null
 
     while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
         Start-Sleep -Milliseconds 1000
@@ -275,15 +307,20 @@ function Invoke-LanguageInstall([string]$LanguageTag) {
         $lastDownloaded = $downloaded
         $lastTime = $now
 
-        $total = [math]::Max($estimate, $downloaded + $remaining)
+        $total = [math]::Max($estimate, $downloaded)
         $elapsed = ($now - $start).TotalSeconds
-        $percent = [math]::Min(99, [math]::Floor($downloaded / $total * 100))
+        $percent = [math]::Max($percent, [math]::Min(99, [math]::Floor($downloaded / $total * 100)))
         $avgSpeed = if ($elapsed -gt 0) { $downloaded / $elapsed } else { 0 }
-        $rate = if ($speed -gt 1KB) { $speed } else { $avgSpeed }
+        $rate = if ($speed -gt 1KB -and $speed -ge $avgSpeed * 0.3) { $speed } else { $avgSpeed }
         $eta = if ($rate -gt 1KB) { Format-Duration (($total - $downloaded) / $rate) } else { "--:--" }
 
+        if ($speed -gt 50KB -or $downloaded -eq 0) { $idleSince = $null } elseif (-not $idleSince) { $idleSince = $now }
         $bar = ('█' * [math]::Floor($percent / 5)).PadRight(20, '░')
-        Show-InstallProgress (" $($spinner[$tick % 4]) $bar $("$percent%".PadLeft(3))  ·  Đã chạy $(Format-Duration $elapsed)  ·  $(Format-Size $speed)/s  ·  Còn ~$eta")
+        if ($idleSince -and ($now - $idleSince).TotalSeconds -ge 20) {
+            Show-InstallProgress (" $($spinner[$tick % 4]) $bar $("$percent%".PadLeft(3))  ·  Đã chạy $(Format-Duration $elapsed)  ·  Đang cài vào Windows...")
+        } else {
+            Show-InstallProgress (" $($spinner[$tick % 4]) $bar $("$percent%".PadLeft(3))  ·  Đã chạy $(Format-Duration $elapsed)  ·  $(Format-Size $speed)/s  ·  Còn ~$eta")
+        }
     }
     Write-Host ""
 
@@ -300,7 +337,7 @@ function Invoke-LanguageInstall([string]$LanguageTag) {
     }
     Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
 
-    $installed = Get-InstalledLanguage -ErrorAction SilentlyContinue | Where-Object { $_.LanguageId -eq $LanguageTag }
+    $installed = Get-InstalledLanguageList | Where-Object { $_.LanguageId -eq $LanguageTag }
     return @{ Success = (-not $failed -and $installed); Message = $message; Duration = (Get-Date) - $start; Installed = $installed }
 }
 
@@ -317,9 +354,12 @@ if ((Test-Match `$sys) -or (Test-Match `$ui)) {
     [System.Windows.MessageBox]::Show("Chưa chuyển được sang $DisplayName (`$target).``nNgôn ngữ hệ thống: `$sys``nNgôn ngữ giao diện: `$ui``n``nHãy khởi động lại máy thêm một lần, nếu vẫn chưa được hãy chạy lại tính năng trong KATK Tools.", 'KATK Tools', 'OK', 'Warning') | Out-Null
 }
 "@
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-    $command = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $encoded"
     try {
+        $dir = Join-Path $env:LOCALAPPDATA "KATK"
+        New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+        $file = Join-Path $dir "LanguageCheck.ps1"
+        [IO.File]::WriteAllText($file, $script, (New-Object Text.UTF8Encoding $true))
+        $command = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$file`""
         New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Force -ErrorAction SilentlyContinue | Out-Null
         Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "KATKLanguageCheck" -Value $command -ErrorAction Stop
         Write-Host "✔ Đã hẹn kiểm tra kết quả ở lần đăng nhập tới." -ForegroundColor Green
@@ -344,15 +384,19 @@ function Set-Language {
 
     $changeLocale = Read-YesNo "Đổi cả System Locale (ảnh hưởng font/bảng mã của phần mềm cũ không hỗ trợ Unicode)?"
 
-    $installed = Get-InstalledLanguage -ErrorAction SilentlyContinue | Where-Object { $_.LanguageId -eq $LanguageTag }
-    if ($installed) {
-        Write-Host "✔ Gói ngôn ngữ $LanguageTag đã có sẵn, bỏ qua bước tải." -ForegroundColor Green
+    $missing = Get-MissingUIPacks $LanguageTag
+    if ($missing.Count -eq 0) {
+        Write-Host "✔ Gói giao diện $LanguageTag đã có, bỏ qua bước tải." -ForegroundColor Green
     } else {
+        Write-Host "  Gói giao diện còn thiếu: $($missing -join ', ')" -ForegroundColor DarkGray
         if (Test-PendingReboot) {
             Write-Host "❌ Windows đang chờ khởi động lại để hoàn tất cập nhật hoặc cài đặt trước đó." -ForegroundColor Red
             Write-Host "  Cài gói ngôn ngữ lúc này sẽ lỗi 0x800F0806. Hãy khởi động lại máy rồi chạy lại tính năng này." -ForegroundColor DarkGray
             Request-KATKRestart
             return $false
+        }
+        if (Test-ServicingBusy) {
+            Write-Host "⚠ Windows Update đang cài dở một bản cập nhật, việc tải gói ngôn ngữ có thể chậm hơn hoặc phải khởi động lại giữa chừng." -ForegroundColor Yellow
         }
         $wuState = Enable-UpdatePrerequisites
         try {
@@ -362,6 +406,10 @@ function Set-Language {
                 Write-Host "→ Đang cài gói ngôn ngữ và Local Experience Pack (lần $attempt/$script:MaxAttempts)..." -ForegroundColor Yellow
                 Write-Host "  Dung lượng và thời gian chỉ là ước lượng. Vui lòng không đóng cửa sổ trong quá trình chờ!" -ForegroundColor DarkGray
                 $result = Invoke-LanguageInstall $LanguageTag
+                if ($result.Success -and (Get-MissingUIPacks $LanguageTag).Count -gt 0) {
+                    $result.Success = $false
+                    $result.Message = "Cài xong nhưng vẫn thiếu gói giao diện: $((Get-MissingUIPacks $LanguageTag) -join ', ')"
+                }
                 if ($result.Success) { break }
                 Write-Host "⚠ Lần $attempt thất bại: $($result.Message)" -ForegroundColor Yellow
                 if (Test-PendingRebootError $result.Message) {
@@ -391,15 +439,7 @@ function Set-Language {
         Write-Host "✔ Cài đặt thành công sau $(Format-Duration $result.Duration.TotalSeconds)" -ForegroundColor Green
     }
 
-    Write-Host "→ Đặt ngôn ngữ hiển thị..." -ForegroundColor Yellow
-    try {
-        $langList = New-WinUserLanguageList -Language $LanguageTag
-        Set-WinUserLanguageList -LanguageList $langList -Force -ErrorAction Stop
-    } catch {
-        Write-Host "⚠ Lỗi: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-
-    Write-Host "→ Ghi đè UI Language..." -ForegroundColor Yellow
+    Write-Host "→ Đặt ngôn ngữ giao diện (giữ nguyên danh sách ngôn ngữ và bộ gõ)..." -ForegroundColor Yellow
     try {
         Set-WinUILanguageOverride -Language $LanguageTag -ErrorAction Stop
     } catch {
@@ -418,24 +458,47 @@ function Set-Language {
     }
 
     Write-Host "→ Cập nhật registry..." -ForegroundColor Yellow
+    $base = Get-NlsBase $LanguageTag $HexCode
+    if ($base.IsLip) {
+        Write-Host "  $LanguageTag là gói giao diện chồng lên $($base.Tag), ngôn ngữ nền của hệ thống sẽ đặt là $($base.Tag)." -ForegroundColor DarkGray
+    }
     $regs = @(
-        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "Default", $HexCode),
-        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguage", $HexCode),
-        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguageFallback", $HexCode),
-        @("HKCU\Control Panel\International", "LocaleName", $LanguageTag),
-        @("HKCU\Control Panel\International", "UserLocale", $LanguageTag),
-        @("HKCU\Control Panel\Desktop", "UserLocale", $LanguageTag),
-        @("HKCU\Control Panel\Desktop\MuiCached", "PreferredUILanguages", $LanguageTag),
-        @("HKCU\Control Panel\Desktop\MuiCached", "MachinePreferredUILanguages", $LanguageTag),
+        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "Default", $base.Hex),
+        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguage", $base.Hex),
+        @("HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "InstallLanguageFallback", $base.Hex),
         @("HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon", "DefaultLanguage", $HexCode),
-        @("HKU\.DEFAULT\Control Panel\International", "LocaleName", $LanguageTag),
-        @("HKU\.DEFAULT\Control Panel\International", "UserLocale", $LanguageTag),
         @("HKU\.DEFAULT\Software\Microsoft\Windows NT\CurrentVersion\Winlogon", "DefaultLanguage", $HexCode)
     )
+    if ($changeLocale) {
+        $regs += @(
+            @("HKCU\Control Panel\International", "LocaleName", $LanguageTag),
+            @("HKCU\Control Panel\International", "UserLocale", $LanguageTag),
+            @("HKCU\Control Panel\Desktop", "UserLocale", $LanguageTag),
+            @("HKU\.DEFAULT\Control Panel\International", "LocaleName", $LanguageTag),
+            @("HKU\.DEFAULT\Control Panel\International", "UserLocale", $LanguageTag)
+        )
+    }
     $failed = 0
     foreach ($r in $regs) {
         if (-not (Set-RegValue $r[0] $r[1] $r[2])) { $failed++ }
     }
+    $multi = @(
+        @("HKCU:\Control Panel\Desktop", "PreferredUILanguages"),
+        @("HKCU:\Control Panel\Desktop\MuiCached", "MachinePreferredUILanguages"),
+        @("Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop", "PreferredUILanguages"),
+        @("HKLM:\SYSTEM\CurrentControlSet\Control\MUI\Settings", "PreferredUILanguages")
+    )
+    foreach ($m in $multi) {
+        try {
+            if (-not (Test-Path $m[0])) { New-Item -Path $m[0] -Force -ErrorAction Stop | Out-Null }
+            Remove-ItemProperty -Path $m[0] -Name $m[1] -ErrorAction SilentlyContinue
+            New-ItemProperty -Path $m[0] -Name $m[1] -PropertyType MultiString -Value ([string[]]@($LanguageTag)) -Force -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Host "  ⚠ Không ghi được $($m[0])\$($m[1])" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+    $regs += $multi
     if ($failed -eq 0) {
         Write-Host "✔ Đã cập nhật registry." -ForegroundColor Green
     } else {
@@ -455,11 +518,12 @@ function Set-Language {
     $nls = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language" -ErrorAction SilentlyContinue
     $override = Get-WinUILanguageOverride
     $checks = @(
-        @{ Name = "Nls Default"; Value = $nls.Default; Expect = $HexCode },
+        @{ Name = "Nls Default"; Value = $nls.Default; Expect = $base.Hex },
+        @{ Name = "PreferredUILanguages"; Value = ((Get-ItemProperty "HKCU:\Control Panel\Desktop" -Name PreferredUILanguages -ErrorAction SilentlyContinue).PreferredUILanguages | Select-Object -First 1); Expect = $LanguageTag },
         @{ Name = "UI Language Override"; Value = $(if ($override) { $override.Name } else { "" }); Expect = $LanguageTag },
-        @{ Name = "Ngôn ngữ đầu danh sách"; Value = (Get-WinUserLanguageList)[0].LanguageTag; Expect = $LanguageTag },
-        @{ Name = "System Locale"; Value = (Get-WinSystemLocale).Name; Expect = $(if ($changeLocale) { $LanguageTag } else { $null }) },
-        @{ Name = "Nls InstallLanguage"; Value = $nls.InstallLanguage; Expect = $HexCode }
+        @{ Name = "Gói giao diện còn thiếu"; Value = $(if ((Get-MissingUIPacks $LanguageTag).Count) { (Get-MissingUIPacks $LanguageTag) -join ', ' } else { "không" }); Expect = "không" },
+        @{ Name = "System Locale"; Value = $(if ($changeLocale) { "$LanguageTag (áp dụng sau khởi động lại)" } else { (Get-WinSystemLocale).Name }); Expect = $null },
+        @{ Name = "Nls InstallLanguage"; Value = $nls.InstallLanguage; Expect = $base.Hex }
     )
     foreach ($c in $checks) {
         $label = $c.Name.PadRight(40)
@@ -471,7 +535,7 @@ function Set-Language {
             Write-Host "  ⚠ $label $($c.Value) (cần $($c.Expect))" -ForegroundColor Yellow
         }
     }
-    Write-Host "  Ngôn ngữ đã cài: $((Get-InstalledLanguage -ErrorAction SilentlyContinue | ForEach-Object { $_.LanguageId }) -join ', ')" -ForegroundColor Gray
+    Write-Host "  Ngôn ngữ đã cài: $((Get-InstalledLanguageList | ForEach-Object { "$($_.LanguageId) [$($_.LanguagePacks)]" }) -join ', ')" -ForegroundColor Gray
 
     Write-Host ""
     Register-PostRebootCheck $LanguageTag $DisplayName
@@ -479,6 +543,7 @@ function Set-Language {
     Write-Host ""
     Write-Host "✅ CÀI ĐẶT HOÀN TẤT!" -ForegroundColor Green
     Write-Host "Cần khởi động lại máy để ngôn ngữ mới có hiệu lực." -ForegroundColor Yellow
+    Write-Host "Bộ gõ, giọng nói, chữ viết tay (nếu cần) tải thêm trong Settings → Time & language → Language & region." -ForegroundColor DarkGray
     if ($script:IsSingleLanguage) {
         Write-Host "Lưu ý: sau mỗi bản cập nhật Windows lớn (ví dụ 24H2 → 25H2), máy có thể quay về ngôn ngữ gốc, khi đó hãy chạy lại tính năng này." -ForegroundColor DarkGray
     }
