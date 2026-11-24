@@ -20,6 +20,7 @@ $KATK_Modules = [ordered]@{
     '4' = @{ Name = "KATK Windows Changes License"; Desc = "Thay đổi phiên bản Windows";                               Path = "modules/WindowsLicense/WindowsLicense.ps1" }
     '5' = @{ Name = "KATK Windows Configuration";   Desc = "Tối ưu hóa hệ thống Windows";                              Path = "modules/WindowsConfiguration/WindowsConfiguration.ps1" }
     '6' = @{ Name = "KATK Office Tools";            Desc = "Tools Uninstall và Install Office";                        Path = "modules/OfficeTools/OfficeTools.ps1" }
+    '7' = @{ Name = "KATK Printer (Beta)";          Desc = "Cài driver, chia sẻ máy in qua mạng LAN / Wi-Fi, xoá máy in"; Path = "modules/Printer/Printer.ps1" }
 }
 
 function Invoke-KATKModule {
