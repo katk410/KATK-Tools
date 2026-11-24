@@ -366,6 +366,17 @@ function Install-Office {
 
             Clear-Host
             Show-Step "ĐANG TẢI FILE CÀI ĐẶT (4~6GB)"
+            if (Test-Path -LiteralPath $imgFile) {
+                try { Dismount-DiskImage -ImagePath $imgFile -ErrorAction Stop | Out-Null } catch { }
+                try { Remove-Item -LiteralPath $imgFile -Force -ErrorAction Stop }
+                catch {
+                    Write-Host "`n❌ File cũ $imgFile đang bị chương trình khác giữ." -ForegroundColor Red
+                    Write-Host "→ Hãy đóng cửa sổ KATK Tools cũ / tháo ổ đĩa ảo Office trong This PC, hoặc khởi động lại máy rồi thử lại." -ForegroundColor Yellow
+                    Read-Host "Nhấn Enter để quay lại"
+                    return
+                }
+            }
+            $httpClient = $null; $response = $null; $stream = $null; $fileStream = $null
             try {
                 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
                 $httpClient = New-Object System.Net.Http.HttpClient
@@ -378,7 +389,7 @@ function Install-Office {
 
                 $buffer = New-Object byte[] 81920
                 $stream = $response.Content.ReadAsStreamAsync().Result
-                $fileStream = [System.IO.File]::OpenWrite($imgFile)
+                $fileStream = [System.IO.File]::Create($imgFile)
                 $totalRead = 0
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 $lastUpdate = 0.0
@@ -401,9 +412,7 @@ function Install-Office {
                     }
                 } while ($true)
                 $fileStream.Close()
-                $stream.Close()
-                $response.Dispose()
-                $httpClient.Dispose()
+                $fileStream = $null
                 Write-Host ""
                 Write-Host "✔ TẢI HOÀN TẤT!" -ForegroundColor Green
                 if (Test-Path $imgFile) {
@@ -415,10 +424,17 @@ function Install-Office {
                 }
             }
             catch {
+                if ($fileStream) { $fileStream.Dispose(); $fileStream = $null }
                 Write-Host "`n❌ LỖI TẢI FILE: $_" -ForegroundColor Red
                 try { Remove-Item $imgFile -Force -ErrorAction SilentlyContinue } catch { }
                 Read-Host "Nhấn Enter để quay lại"
                 return
+            }
+            finally {
+                if ($fileStream) { $fileStream.Dispose() }
+                if ($stream) { $stream.Dispose() }
+                if ($response) { $response.Dispose() }
+                if ($httpClient) { $httpClient.Dispose() }
             }
 
             Show-Step "ĐANG MOUNT FILE CÀI ĐẶT"
@@ -438,6 +454,7 @@ function Install-Office {
             }
             catch {
                 Write-Host "❌ LỖI MOUNT FILE IMG: $_" -ForegroundColor Red
+                try { Dismount-DiskImage -ImagePath $imgFile -ErrorAction SilentlyContinue | Out-Null } catch { }
                 Read-Host "Nhấn Enter để quay lại"
                 return
             }
@@ -450,6 +467,7 @@ function Install-Office {
 
             if (-not (Test-Path -LiteralPath $setupFile)) {
                 Write-Host "❌ KHÔNG TÌM THẤY FILE CÀI ĐẶT TẠI $setupFile" -ForegroundColor Red
+                try { Dismount-DiskImage -ImagePath $imgFile -ErrorAction SilentlyContinue | Out-Null } catch { }
                 Read-Host "Nhấn Enter để quay lại"
                 return
             }
