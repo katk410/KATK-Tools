@@ -82,10 +82,158 @@ function Show-KPAttached {
         else {
             Write-Host "   ❌ Không tìm được driver $arch cho máy in này" -ForegroundColor Red
             if ($arch -eq 'ARM64') { Write-Host "   - Nhiều hãng chưa có driver ARM64; máy in đời mới thường in được bằng driver chung của Windows (Mopria)" -ForegroundColor Gray }
-            Write-Host "   - Có thể tải driver trên trang của hãng máy in" -ForegroundColor Gray
+            Write-Host "   - Tải driver trên trang của hãng rồi dùng mục [2] Cài từ gói đã tải" -ForegroundColor Gray
         }
     }
     Wait-KATKBack
+}
+
+function Select-KPPackage {
+    Write-Host ""
+    Write-Host "Nhận: .exe .msi .zip .cab .7z .rar .inf hoặc thư mục đã giải nén" -ForegroundColor Gray
+    Write-Host "Enter = mở cửa sổ chọn tệp, hoặc dán đường dẫn tệp / thư mục, 0 = quay lại" -ForegroundColor Yellow
+    $p = "$(Read-Host 'Gói driver')".Trim().Trim('"')
+    if ($p -eq '0') { return $null }
+    if ($p) { return $p }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Title = "Chọn gói driver máy in"
+        $dlg.Filter = "Gói driver|*.exe;*.msi;*.zip;*.cab;*.7z;*.rar;*.inf|Mọi tệp|*.*"
+        $down = Join-Path $env:USERPROFILE 'Downloads'
+        if (Test-Path $down) { $dlg.InitialDirectory = $down }
+        $own = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+        $r = $dlg.ShowDialog($own); $own.Dispose()
+        if ($r -eq 'OK') { return $dlg.FileName }
+    }
+    catch { Write-Host "⚠ Không mở được cửa sổ chọn tệp, hãy dán đường dẫn" -ForegroundColor Yellow; Start-Sleep 2 }
+    return $null
+}
+
+function Install-KPOffline {
+    Clear-Host
+    Show-KATKHeader "KATK PRINTER - CÀI TỪ GÓI ĐÃ TẢI"
+    $arch = Get-KPArch
+    Write-Host ""
+    Write-Host "Máy này: Windows $($arch.ToUpper()). Không cần mạng, chưa cắm máy in cũng cài được." -ForegroundColor Gray
+    $path = Select-KPPackage
+    if (-not $path) { return }
+    if (-not (Test-Path -LiteralPath $path)) { Write-Host "❌ Không thấy: $path" -ForegroundColor Red; Wait-KATKBack; return }
+    $item = Get-Item -LiteralPath $path
+    Initialize-KPDir
+    $work = Join-Path $global:KP_Dir ('import-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force $work | Out-Null
+    try {
+        Write-Host ""
+        Write-Host "▶ $($item.Name)" -ForegroundColor Cyan
+        $infs = @()
+        if ($item.PSIsContainer) { $infs = @(Get-KPPackageInfs $item.FullName $arch) }
+        elseif ($item.Extension -eq '.inf') { $x = Get-KPInfInfo -InfPath $item.FullName -Arch $arch; if ($x -and @($x.Models).Count) { $infs = @($x) } }
+        else { $infs = @(Expand-KPPackage $item.FullName $work $arch) }
+
+        if ($infs.Count -eq 0 -and $item.Extension -in '.exe', '.msi') {
+            $sg = Get-AuthenticodeSignature -LiteralPath $item.FullName
+            Write-Host ""
+            Write-Host "Không lấy được driver $($arch.ToUpper()) bằng cách giải nén." -ForegroundColor Yellow
+            Write-Host "Có thể mở bộ cài của hãng, KATK sẽ lấy driver khi nó tự bung ra:" -ForegroundColor Gray
+            if ($sg.Status -eq 'Valid') { Write-Host "- Chữ ký: $($sg.SignerCertificate.GetNameInfo('SimpleName', $false))" -ForegroundColor Green }
+            else { Write-Host "- ⚠ Tệp KHÔNG có chữ ký hợp lệ, chỉ tiếp tục nếu tải từ trang chính hãng" -ForegroundColor Red }
+            Write-Host "- Bộ cài có thể cài thêm phần mềm của hãng" -ForegroundColor Gray
+            Write-Host "- Cứ cài bình thường, hoặc đóng lại khi nó hỏi cắm máy in" -ForegroundColor Gray
+            Write-Host "- Xong thì quay lại cửa sổ này nhấn Enter" -ForegroundColor Gray
+            if ((Read-Host "Y = mở bộ cài, Enter = Hủy") -match '^[yY]') {
+                $before = @(Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object Name)
+                Write-Host "   Đang chờ bộ cài... (nhấn Enter khi xong)" -ForegroundColor Cyan
+                $infs = @(Watch-KPVendorSetup $item.FullName $work $arch)
+                $new = @(Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object Name | Where-Object { $before -notcontains $_ })
+                if ($new.Count) { Write-Host "✔ Bộ cài đã thêm driver: $($new -join ', ')" -ForegroundColor Green; if ($infs.Count -eq 0) { Write-Host "Cắm máy in là dùng được." -ForegroundColor Green; return } }
+            }
+            else { return }
+        }
+        if ($infs.Count -eq 0) {
+            Write-Host "❌ Không thấy driver máy in $($arch.ToUpper()) trong gói này" -ForegroundColor Red
+            Write-Host "- Kiểm tra đã tải đúng bản cho Windows $($arch.ToUpper())" -ForegroundColor Gray
+            Write-Host "- Gói chỉ có phần mềm quét / tiện ích thì không có driver in" -ForegroundColor Gray
+            if ($item.Extension -in '.7z', '.rar') { Write-Host "- Thử cài 7-Zip rồi chạy lại, hoặc tự giải nén và chọn thư mục" -ForegroundColor Gray }
+            return
+        }
+
+        $models = @($infs | ForEach-Object { $_.Models } | ForEach-Object Name | Select-Object -Unique | Sort-Object)
+        Write-Host "   Gói có $($models.Count) model: $(@($models | Select-Object -First 4) -join ', ')$(if ($models.Count -gt 4) { '...' })" -ForegroundColor Gray
+        $need = @(Get-KPAttachedPrinters | Where-Object { -not $_.HasDriver })
+        if ($need.Count) {
+            foreach ($d in $need) {
+                Write-Host ""
+                Write-Host "▶ $($d.Name)" -ForegroundColor Cyan
+                if (Complete-KPOfflineDevice -Device $d -Infs $infs) { Write-Host "   ✔ Đã cài xong, máy in dùng được" -ForegroundColor Green }
+            }
+            return
+        }
+
+        $sel = $infs
+        if ($models.Count -gt 1) {
+            Write-Host ""
+            Write-Host "Nhập tên model máy in của bạn (vd: P1102), Enter = nạp cả gói, 0 = quay lại" -ForegroundColor Yellow
+            $f = "$(Read-Host 'Model')".Trim()
+            if ($f -eq '0') { return }
+            if ($f) {
+                $models = @($models | Where-Object { $_.IndexOf($f, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+                if ($models.Count -eq 0) { Write-Host "Không có model nào khớp '$f'" -ForegroundColor Yellow; return }
+                $sel = @($infs | Where-Object { @(@($_.Models).Name | Where-Object { $models -contains $_ }).Count })
+            }
+        }
+        $ok = 0; $fail = 0
+        $seen = @{}
+        foreach ($i in $sel) {
+            $key = (Get-FileHash -LiteralPath $i.Inf).Hash
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = 1
+            if (-not (Test-KPInfSigned $i)) { Write-Host "   ⚠ Bỏ qua $([IO.Path]::GetFileName($i.Inf)): không có chữ ký hợp lệ" -ForegroundColor Yellow; $fail++; continue }
+            Write-Host "   Nạp: $([IO.Path]::GetFileName($i.Inf))" -ForegroundColor Gray
+            if (Add-KPInfToStore $i) { $ok++ } else { $fail++; Write-Host "   ❌ Windows từ chối gói driver này" -ForegroundColor Red }
+        }
+        if ($ok -eq 0) { Write-Host "❌ Chưa nạp được driver nào" -ForegroundColor Red; return }
+        if ($models.Count -le 3) { foreach ($m in $models) { try { Add-PrinterDriver -Name $m -ErrorAction Stop } catch { } } }
+        Write-Host ""
+        Write-Host "✔ Đã nạp driver vào Windows" -ForegroundColor Green
+        Write-Host "- Cắm máy in và bật nguồn, Windows tự nhận, không cần mạng" -ForegroundColor Gray
+        Write-Host "- Đang chờ máy in (tối đa 3 phút, phím bất kỳ = thôi chờ)..." -ForegroundColor Gray
+        $known = @(Get-KPAttachedPrinters | ForEach-Object DeviceId)
+        $end = (Get-Date).AddMinutes(3)
+        while ((Get-Date) -lt $end) {
+            try { if ([Console]::KeyAvailable) { [void][Console]::ReadKey($true); return } } catch { return }
+            Start-Sleep -Seconds 1
+            $d = Get-KPAttachedPrinters | Where-Object { $known -notcontains $_.DeviceId } | Select-Object -First 1
+            if (-not $d) { continue }
+            Write-Host "▶ Thấy $($d.Name)" -ForegroundColor Cyan
+            for ($w = 0; $w -lt 15 -and -not $d.HasDriver; $w++) { Start-Sleep 2; $n = Get-KPAttachedPrinters | Where-Object DeviceId -eq $d.DeviceId | Select-Object -First 1; if ($n) { $d = $n } }
+            if ($d.HasDriver -or (Complete-KPOfflineDevice -Device $d -Infs $infs)) { Write-Host "✔ Máy in dùng được" -ForegroundColor Green }
+            return
+        }
+    }
+    catch { Write-Host "❌ $($_.Exception.Message)" -ForegroundColor Red }
+    finally {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        Wait-KATKBack
+    }
+}
+
+function Show-KPDriverMenu {
+    while ($true) {
+        Clear-Host
+        Show-KATKHeader "KATK PRINTER - CÀI DRIVER"
+        Write-Host ""
+        Write-Host " [1] Tự tìm và cài" -ForegroundColor White
+        Write-Host "     Cho máy in đang cắm, cần mạng`n" -ForegroundColor DarkGray
+        Write-Host " [2] Cài từ gói đã tải của hãng" -ForegroundColor White
+        Write-Host "     Không cần mạng: .exe .msi .zip .cab .7z .rar .inf / thư mục`n" -ForegroundColor DarkGray
+        Write-Host " [0] Quay lại" -ForegroundColor Red
+        switch (Read-Host "`nChọn") {
+            '1' { Show-KPAttached }
+            '2' { Install-KPOffline }
+            '0' { return }
+        }
+    }
 }
 
 function Show-KPServerStatus {
@@ -393,7 +541,7 @@ function Show-KPMenu {
     Write-Host "LỰA CHỌN CÔNG CỤ:" -ForegroundColor Yellow
     Write-KATKLine
     Write-Host " [1] Cài driver máy in" -ForegroundColor White
-    Write-Host "     Tự tìm driver cho máy in đang cắm (AMD64 / ARM64)`n" -ForegroundColor DarkGray
+    Write-Host "     Tự tìm driver, hoặc cài từ gói đã tải của hãng`n" -ForegroundColor DarkGray
     Write-Host " [2] Máy chủ - chia sẻ máy in" -ForegroundColor White
     Write-Host "     Chạy trên máy đang cắm máy in`n" -ForegroundColor DarkGray
     Write-Host " [3] Máy con - dùng máy in qua mạng" -ForegroundColor White
@@ -408,7 +556,7 @@ if (-not $global:KATK_PrnNoMenu) {
     do {
         Show-KPMenu
         switch (Read-Host "`nNhập lựa chọn của bạn") {
-            '1' { Show-KPAttached }
+            '1' { Show-KPDriverMenu }
             '2' { Show-KPServer }
             '3' { Show-KPClient }
             '4' { Show-KPRemove }

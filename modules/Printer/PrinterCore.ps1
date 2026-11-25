@@ -1215,3 +1215,285 @@ function global:Install-KPAttachedDriver {
     if ($loaded) { Write-Host "   ⚠ Đã nạp driver nhưng Windows chưa nhận máy in, thử rút cắm lại cáp" -ForegroundColor Yellow }
     return $false
 }
+
+if (-not ('KATKPrn.Carver' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+namespace KATKPrn
+{
+    public static class Carver
+    {
+        static readonly byte[][] Sig = new byte[][] {
+            new byte[] { 0x4D, 0x53, 0x43, 0x46, 0, 0, 0, 0 },
+            new byte[] { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C },
+            new byte[] { 0x50, 0x4B, 0x03, 0x04 },
+            new byte[] { 0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1 },
+            new byte[] { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07 } };
+        static readonly string[] Ext = new string[] { ".cab", ".7z", ".zip", ".msi", ".rar" };
+
+        public static string[] Carve(string file, string outDir, int max)
+        {
+            List<string> res = new List<string>();
+            using (FileStream f = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20))
+            {
+                long len = f.Length, pos = 0, skipTo = 0;
+                bool[] once = new bool[5];
+                byte[] b = new byte[(1 << 20) + 64];
+                int keep = 0;
+                while (res.Count < max)
+                {
+                    f.Position = pos + keep;
+                    int got = f.Read(b, keep, b.Length - keep);
+                    int n = keep + got;
+                    if (got <= 0) break;
+                    for (int i = 0; i + 36 <= n && res.Count < max; i++)
+                    {
+                        long at = pos + i;
+                        if (at < skipTo || at == 0) continue;
+                        byte c = b[i];
+                        if (c != 0x4D && c != 0x37 && c != 0x50 && c != 0xD0 && c != 0x52) continue;
+                        for (int s = 0; s < Sig.Length; s++)
+                        {
+                            bool hit = true;
+                            for (int k = 0; k < Sig[s].Length; k++) if (b[i + k] != Sig[s][k]) { hit = false; break; }
+                            if (!hit || once[s]) continue;
+                            long size = len - at;
+                            if (s == 0)
+                            {
+                                long cb = BitConverter.ToUInt32(b, i + 8);
+                                if (b[i + 24] != 3 || b[i + 25] != 1 || cb < 64 || cb > size) continue;
+                                size = cb; skipTo = at + cb;
+                            }
+                            else if (s == 1) { if (b[i + 6] != 0) continue; once[s] = true; }
+                            else once[s] = true;
+                            string o = Path.Combine(outDir, "part" + res.Count + Ext[s]);
+                            Copy(file, at, size, o);
+                            res.Add(o);
+                            break;
+                        }
+                    }
+                    keep = Math.Min(35, n);
+                    pos += n - keep;
+                    Buffer.BlockCopy(b, n - keep, b, 0, keep);
+                }
+            }
+            return res.ToArray();
+        }
+
+        static void Copy(string src, long at, long size, string dst)
+        {
+            using (FileStream i = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (FileStream o = File.Create(dst))
+            {
+                i.Position = at;
+                byte[] b = new byte[1 << 20];
+                while (size > 0) { int n = i.Read(b, 0, (int)Math.Min(b.Length, size)); if (n <= 0) break; o.Write(b, 0, n); size -= n; }
+            }
+        }
+    }
+}
+'@
+}
+
+function global:Get-KPInfInfo {
+    param([string]$InfPath, [string]$Arch)
+    $lines = @(Get-Content -LiteralPath $InfPath -ErrorAction SilentlyContinue)
+    if (-not $lines) { return $null }
+    $sections = @{}; $cur = $null
+    foreach ($raw in $lines) {
+        $l = $raw.Trim()
+        if (-not $l -or $l.StartsWith(';')) { continue }
+        if ($l -match '^\[(.+?)\]') { $cur = $Matches[1].Trim().ToLower(); if (-not $sections.ContainsKey($cur)) { $sections[$cur] = New-Object System.Collections.ArrayList }; continue }
+        if ($cur) { [void]$sections[$cur].Add($l) }
+    }
+    if (-not $sections.ContainsKey('version') -or -not $sections.ContainsKey('manufacturer')) { return $null }
+    $ver = @($sections['version']) -join "`n"
+    if ($ver -notmatch '(?im)^\s*Class\s*=\s*"?Printer\b' -and $ver -notmatch '(?i)4d36e979-e325-11ce-bfc1-08002be10318') { return $null }
+    $cats = @([regex]::Matches($ver, '(?im)^\s*CatalogFile[^=\r\n]*=\s*"?([^"\s;]+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $strings = @{}
+    foreach ($k in @($sections.Keys | Where-Object { $_ -like 'strings*' } | Sort-Object { if ($_ -eq 'strings') { 0 } else { 1 } })) {
+        foreach ($l in $sections[$k]) { if ($l -match '^([^=]+?)\s*=\s*"?(.*?)"?\s*(;.*)?$') { $n = $Matches[1].Trim().ToLower(); if (-not $strings.ContainsKey($n)) { $strings[$n] = $Matches[2] } } }
+    }
+    $models = New-Object System.Collections.ArrayList
+    foreach ($l in $sections['manufacturer']) {
+        if ($l -notmatch '=\s*([^;]+)') { continue }
+        $parts = @($Matches[1].Split(',') | ForEach-Object { $_.Trim() })
+        $secs = @($parts | Select-Object -Skip 1 | Where-Object { $_ -match "^nt$Arch(\.|$)" } | ForEach-Object { "$($parts[0]).$_" })
+        if ($Arch -eq 'x86') { $secs += $parts[0] }
+        foreach ($s in $secs) {
+            $s = $s.ToLower()
+            if (-not $sections.ContainsKey($s)) { continue }
+            foreach ($m in $sections[$s]) {
+                if ($m -notmatch '^(.+?)\s*=\s*([^;]+)') { continue }
+                $name = $Matches[1].Trim().Trim('"'); $rest = $Matches[2]
+                if ($name -match '^%(.+)%$') { $k = $Matches[1].ToLower(); if ($strings.ContainsKey($k)) { $name = $strings[$k] } }
+                [void]$models.Add([pscustomobject]@{ Name = $name; Ids = @($rest.Split(',') | Select-Object -Skip 1 | ForEach-Object { $_.Trim().Trim('"').ToLower() } | Where-Object { $_ }) })
+            }
+        }
+    }
+    return [pscustomobject]@{ Inf = $InfPath; Dir = (Split-Path -Parent $InfPath); Cats = $cats; Models = @($models) }
+}
+
+function global:Get-KPPackageInfs([string]$Dir, [string]$Arch) {
+    $out = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -Filter *.inf -File -ErrorAction SilentlyContinue | Where-Object Extension -eq '.inf')) {
+        $i = Get-KPInfInfo -InfPath $f.FullName -Arch $Arch
+        if ($i -and @($i.Models).Count) { $out += $i }
+    }
+    return $out
+}
+
+function global:Test-KPInfSigned($Info) {
+    foreach ($c in @($Info.Cats)) {
+        $p = Join-Path $Info.Dir $c
+        if ((Test-Path -LiteralPath $p) -and (Get-AuthenticodeSignature -LiteralPath $p).Status -eq 'Valid') { return $true }
+    }
+    return $false
+}
+
+function global:Invoke-KPProc([string]$File, [string]$ArgLine, [int]$Sec = 600) {
+    $si = New-Object Diagnostics.ProcessStartInfo $File, $ArgLine
+    $si.UseShellExecute = $false; $si.CreateNoWindow = $true
+    $p = [Diagnostics.Process]::Start($si)
+    if (-not $p.WaitForExit($Sec * 1000)) { try { $p.Kill() } catch { }; return -1 }
+    return $p.ExitCode
+}
+
+function global:Expand-KPFile([string]$File, [string]$Out) {
+    New-Item -ItemType Directory -Force $Out | Out-Null
+    function HasOut { @(Get-ChildItem -LiteralPath $Out -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1).Count -gt 0 }
+    $fs = [IO.File]::OpenRead($File); $h = New-Object byte[] 8; [void]$fs.Read($h, 0, 8); $fs.Close()
+    $sig = [BitConverter]::ToString($h)
+    $sys = "$env:SystemRoot\System32"
+    if ($sig -like 'D0-CF-11-E0*') {
+        [void](Invoke-KPProc "$sys\msiexec.exe" "/a `"$File`" /qn TARGETDIR=`"$Out`"" 900)
+        Get-ChildItem -LiteralPath $Out -Filter *.msi -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        return (HasOut)
+    }
+    if ($sig -like '4D-53-43-46*') { [void](Invoke-KPProc "$sys\expand.exe" "-F:* `"$File`" `"$Out`""); return (HasOut) }
+    $tar = "$sys\tar.exe"
+    if (Test-Path $tar) { if ((Invoke-KPProc $tar "-xf `"$File`" -C `"$Out`"" 900) -eq 0 -and (HasOut)) { return $true } }
+    elseif ($sig -like '50-4B-03-04*') { try { Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($File, $Out) } catch { }; if (HasOut) { return $true } }
+    foreach ($z in "$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") {
+        if (Test-Path -LiteralPath $z) { [void](Invoke-KPProc $z "x -y -o`"$Out`" `"$File`"" 900); break }
+    }
+    return (HasOut)
+}
+
+function global:Expand-KPPackage([string]$Path, [string]$Work, [string]$Arch) {
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue(@($Path, 0)); $count = 0
+    while ($queue.Count -gt 0 -and $count -lt 60) {
+        $it = $queue.Dequeue(); $file = $it[0]; $depth = [int]$it[1]; $count++
+        if ((New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($Work))).AvailableFreeSpace -lt 2GB) { throw "Ổ đĩa hệ thống còn dưới 2 GB, không đủ chỗ giải nén" }
+        $out = Join-Path $Work "x$count"
+        if ($count -le 20) { Write-Host "   Giải nén: $([IO.Path]::GetFileName($file))" -ForegroundColor DarkGray }
+        $dirs = @()
+        if ($file -match "[^\x20-\x7E]|[\[\]%]") {
+            $ascii = Join-Path $Work ("src$count" + [IO.Path]::GetExtension($file))
+            [IO.File]::Copy($file, $ascii, $true); $file = $ascii
+        }
+        try { if (Expand-KPFile $file $out) { $dirs += $out } } catch { }
+        $infs = @(if ($dirs) { Get-KPPackageInfs $out $Arch })
+        if ($infs.Count) { return $infs }
+        if ([IO.Path]::GetExtension($file) -in '.exe', '.bin', '.dat') {
+            $cd = Join-Path $Work "c$count"; New-Item -ItemType Directory -Force $cd | Out-Null
+            try { if (@([KATKPrn.Carver]::Carve($file, $cd, 30)).Count) { $dirs += $cd } } catch { }
+        }
+        if ($depth -ge 3) { continue }
+        foreach ($d in $dirs) {
+            Get-ChildItem -LiteralPath $d -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.zip', '.cab', '.msi', '.7z', '.rar', '.exe' -and ($_.Length -gt 20KB -or $_.Extension -ne '.exe') } |
+                Sort-Object Length -Descending | Select-Object -First 30 | ForEach-Object { $queue.Enqueue(@($_.FullName, ($depth + 1))) }
+        }
+    }
+    return @()
+}
+
+function global:Watch-KPVendorSetup([string]$File, [string]$Work, [string]$Arch) {
+    $roots = @($env:TEMP, "$env:SystemRoot\Temp") | Select-Object -Unique
+    function ListInf($r) { Get-ChildItem -LiteralPath $r -Recurse -Filter *.inf -File -ErrorAction SilentlyContinue | ForEach-Object FullName }
+    function ListTop { Get-ChildItem "$env:SystemDrive\" -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object FullName }
+    $old = @{}; foreach ($r in $roots) { foreach ($p in @(ListInf $r)) { if ($p) { $old[$p] = 1 } } }
+    $top = @(ListTop)
+    $grab = Join-Path $Work 'grab'; New-Item -ItemType Directory -Force $grab | Out-Null
+    $seen = @{}
+    $a = @{ FilePath = $File; PassThru = $true; ErrorAction = 'Stop' }
+    if ($File -match '\.msi$') { $a.FilePath = "$env:SystemRoot\System32\msiexec.exe"; $a.ArgumentList = "/i `"$File`"" }
+    $proc = Start-Process @a
+    $stop = $false; $idle = 0
+    while (-not $stop) {
+        $had = $seen.Count
+        $end = (Get-Date).AddSeconds(3)
+        while ((Get-Date) -lt $end -and -not $stop) {
+            try { if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq 'Enter') { $stop = $true } } catch { if ($proc.HasExited) { $stop = $true } }
+            Start-Sleep -Milliseconds 200
+        }
+        foreach ($r in @($roots) + @(ListTop | Where-Object { $top -notcontains $_ })) {
+            foreach ($p in @(ListInf $r)) {
+                if (-not $p -or $old.ContainsKey($p) -or $p.StartsWith($Work, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                $d = Split-Path -Parent $p
+                if ($roots -contains $d -or $seen.ContainsKey($d)) { continue }
+                if (Get-KPInfInfo -InfPath $p -Arch $Arch) { $seen[$d] = "g$($seen.Count)"; Write-Host "   Thấy driver: $([IO.Path]::GetFileName($p))" -ForegroundColor Gray }
+            }
+        }
+        foreach ($d in @($seen.Keys)) { if (Test-Path -LiteralPath $d) { [void](Invoke-KPProc "$env:SystemRoot\System32\robocopy.exe" "`"$d`" `"$(Join-Path $grab $seen[$d])`" /E /R:0 /W:0" 120) } }
+        if ($proc.HasExited -and $seen.Count -eq $had) { $idle++ } else { $idle = 0 }
+        if ($idle -ge 40 -or ($idle -ge 5 -and $seen.Count -and -not @($seen.Keys | Where-Object { Test-Path -LiteralPath $_ }).Count)) { $stop = $true }
+    }
+    return @(Get-KPPackageInfs $grab $Arch)
+}
+
+function global:Add-KPInfToStore($Info) {
+    $out = & "$env:SystemRoot\System32\pnputil.exe" /add-driver $Info.Inf /install 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    if ($code -in 0, 259, 3010, 1641) { return $true }
+    $why = @($out -split "\r?\n" | Where-Object { $_.Trim() } | Select-Object -Skip 1 | ForEach-Object { $_.Trim() } | Where-Object { $_ -notmatch ":\s+\d+$" }) -join " · "
+    Write-Host "   pnputil ($code): $why" -ForegroundColor DarkGray
+    return $false
+}
+
+function global:Get-KPUsbPort($Device) {
+    if ("$($Device.DeviceId)" -match '((?:USB|LPT)\d+)$' -and (Get-PrinterPort -Name $Matches[1] -ErrorAction SilentlyContinue)) { return $Matches[1] }
+    return $null
+}
+
+function global:Get-KPInfForDevice($Infs, $Device) {
+    $want = @($Device.HwIds | ForEach-Object { "$_".ToLower() })
+    foreach ($i in @($Infs)) { foreach ($m in @($i.Models)) { foreach ($id in @($m.Ids)) { if ($want -contains $id) { return [pscustomobject]@{ Info = $i; Model = $m.Name } } } } }
+    return $null
+}
+
+function global:Complete-KPOfflineDevice {
+    param($Device, $Infs)
+    $hit = Get-KPInfForDevice $Infs $Device
+    if ($hit) {
+        Write-Host "   Cài: $($hit.Model)" -ForegroundColor Gray
+        if (-not (Test-KPInfSigned $hit.Info)) { Write-Host "   ❌ Driver không có chữ ký hợp lệ, không cài" -ForegroundColor Red; return $false }
+        if (-not (Add-KPInfToStore $hit.Info)) { Write-Host "   ❌ Windows từ chối gói driver này" -ForegroundColor Red; return $false }
+        $model = $hit.Model
+        [void](Wait-KPDeviceReady $Device)
+    }
+    else {
+        $names = @($Infs | ForEach-Object { $_.Models } | ForEach-Object Name | Select-Object -Unique | Sort-Object)
+        Write-Host "   Gói này không ghi mã của máy in đang cắm." -ForegroundColor Yellow
+        $f = Read-Host "   Nhập tên model để chọn tay (vd: P1102), Enter = bỏ qua"
+        if ([string]::IsNullOrWhiteSpace($f)) { return $false }
+        $names = @($names | Where-Object { $_.IndexOf($f.Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0 } | Select-Object -First 30)
+        if ($names.Count -eq 0) { Write-Host "   Không có model nào khớp '$f'" -ForegroundColor Yellow; return $false }
+        for ($i = 0; $i -lt $names.Count; $i++) { Write-Host "   [$($i + 1)] $($names[$i])" -ForegroundColor White }
+        $c = Read-Host "   Chọn số, Enter = bỏ qua"
+        if ($c -notmatch '^\d+$' -or [int]$c -lt 1 -or [int]$c -gt $names.Count) { return $false }
+        $model = $names[[int]$c - 1]
+        $info = $Infs | Where-Object { @($_.Models).Name -contains $model } | Select-Object -First 1
+        if (-not (Test-KPInfSigned $info) -or -not (Add-KPInfToStore $info)) { Write-Host "   ❌ Windows từ chối gói driver này" -ForegroundColor Red; return $false }
+    }
+    if (-not (Test-KPDriver $model)) { try { Add-PrinterDriver -Name $model -ErrorAction Stop } catch { } }
+    if (Get-Printer -ErrorAction SilentlyContinue | Where-Object DriverName -eq $model) { return $true }
+    $port = Get-KPUsbPort $Device
+    if (-not $port) { $port = @(Get-PrinterPort -ErrorAction SilentlyContinue | Where-Object Name -match '^USB\d+$' | ForEach-Object Name)[0] }
+    if ($port) { try { Add-Printer -Name $model -DriverName $model -PortName $port -ErrorAction Stop; return $true } catch { Write-Host "   ⚠ $($_.Exception.Message)" -ForegroundColor Yellow } }
+    Write-Host "   ⚠ Đã nạp driver nhưng Windows chưa nhận máy in, thử rút cắm lại cáp" -ForegroundColor Yellow
+    return $false
+}
